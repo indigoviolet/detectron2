@@ -83,7 +83,7 @@ _C.INPUT.FORMAT = "BGR"
 # Mask R-CNN supports either "polygon" or "bitmask" as ground truth.
 _C.INPUT.MASK_FORMAT = "polygon"  # alternative: "bitmask"
 
-
+_C.INPUT.RANDOM_FLIP_TRAIN = CN({"ENABLED": True})
 # -----------------------------------------------------------------------------
 # Dataset
 # -----------------------------------------------------------------------------
