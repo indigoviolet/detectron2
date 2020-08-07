@@ -354,9 +354,9 @@ class BasicStem(CNNBlockBase):
 
     def forward(self, x):
         x = self.conv1(x)
-        x = F.relu_(x)
-        x = F.max_pool2d(x, kernel_size=3, stride=2, padding=1)
-        return x
+        x1 = F.relu_(x)
+        x2 = F.max_pool2d(x1, kernel_size=3, stride=2, padding=1)
+        return (x1, x2)
 
 
 class ResNet(Backbone):
@@ -381,8 +381,16 @@ class ResNet(Backbone):
         self.num_classes = num_classes
 
         current_stride = self.stem.stride
-        self._out_feature_strides = {"stem": current_stride}
-        self._out_feature_channels = {"stem": self.stem.out_channels}
+        self._out_feature_strides = {
+            "stem": current_stride,
+            "x": 1,
+            "before_maxpool": 2,
+        }
+        self._out_feature_channels = {
+            "stem": self.stem.out_channels,
+            "x": 3,
+            "before_maxpool": self.stem.out_channels,
+        }
 
         self.stages_and_names = []
         for i, blocks in enumerate(stages):
@@ -427,9 +435,12 @@ class ResNet(Backbone):
         Returns:
             dict[str->Tensor]
         """
-        assert x.dim() == 4, f"ResNet takes an input of shape (N, C, H, W). Got {x.shape} instead!"
-        outputs = {}
-        x = self.stem(x)
+        assert (
+            x.dim() == 4
+        ), f"ResNet takes an input of shape (N, C, H, W). Got {x.shape} instead!"
+        outputs = {"x": x}
+        before_maxpool, x = self.stem(x)
+        outputs["before_maxpool"] = before_maxpool
         if "stem" in self._out_features:
             outputs["stem"] = x
         for stage, name in self.stages_and_names:
@@ -449,7 +460,7 @@ class ResNet(Backbone):
             name: ShapeSpec(
                 channels=self._out_feature_channels[name], stride=self._out_feature_strides[name]
             )
-            for name in self._out_features
+            for name in self._out_features + ['x', 'before_maxpool']
         }
 
     def freeze(self, freeze_at=0):
