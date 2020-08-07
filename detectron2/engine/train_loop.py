@@ -208,6 +208,9 @@ class SimpleTrainer(TrainerBase):
         self._data_loader_iter = iter(data_loader)
         self.optimizer = optimizer
 
+    def next_data(self):
+        return next(self._data_loader_iter)
+
     def run_step(self):
         """
         Implement the standard training logic described above.
@@ -217,7 +220,7 @@ class SimpleTrainer(TrainerBase):
         """
         If you want to do something with the data, you can wrap the dataloader.
         """
-        data = next(self._data_loader_iter)
+        data = self.next_data()
         data_time = time.perf_counter() - start
 
         """

@@ -14,6 +14,8 @@ import logging
 import os
 import sys
 from collections import OrderedDict
+import contextlib
+import time
 import torch
 from fvcore.common.file_io import PathManager
 from fvcore.nn.precise_bn import get_bn_modules
@@ -217,6 +219,8 @@ class DefaultPredictor:
             predictions = self.model([inputs])[0]
             return predictions
 
+from torch.cuda.amp import GradScaler, autocast
+
 
 class DefaultTrainer(SimpleTrainer):
     """
@@ -273,6 +277,13 @@ class DefaultTrainer(SimpleTrainer):
         model = self.build_model(cfg)
         optimizer = self.build_optimizer(cfg, model)
         data_loader = self.build_train_loader(cfg)
+
+        logger = logging.getLogger(__name__)
+        if cfg.SOLVER.AMP.ENABLED:
+            logger.info("Using AMP")
+            self.scaler = GradScaler()
+        else:
+            logger.info("Not using AMP")
 
         # For training, wrap with DDP. But don't need this for inference.
         if comm.get_world_size() > 1:
@@ -388,6 +399,55 @@ class DefaultTrainer(SimpleTrainer):
             JSONWriter(os.path.join(self.cfg.OUTPUT_DIR, "metrics.json")),
             TensorboardXWriter(self.cfg.OUTPUT_DIR),
         ]
+
+    def run_step(self):
+        if not self.cfg.SOLVER.AMP.ENABLED:
+            return super().run_step()
+
+        """
+        Implement the standard training logic described above.
+        """
+        assert self.model.training, "[SimpleTrainer/DefaultTrainer] model was changed to eval mode!"
+        start = time.perf_counter()
+        """
+        If you want to do something with the data, you can wrap the dataloader.
+        """
+        data = self.next_data()
+        data_time = time.perf_counter() - start
+
+        """
+        If you need to accumulate gradients or do something similar, you can
+        wrap the optimizer with your custom `zero_grad()` method.
+        """
+        self.optimizer.zero_grad()
+
+        """
+        If you want to do something with the losses, you can wrap the model.
+        """
+        with autocast():
+            loss_dict = self.model(data)
+            losses = sum(loss_dict.values())
+
+        # losses.backward()
+        self.scaler.scale(losses).backward()
+
+        # use a new stream so the ops don't wait for DDP
+        with torch.cuda.stream(
+            torch.cuda.Stream()
+        ) if losses.device.type == "cuda" else contextlib.nullcontext():
+            metrics_dict = loss_dict
+            metrics_dict["data_time"] = data_time
+            self._write_metrics(metrics_dict)
+            self._detect_anomaly(losses, loss_dict)
+
+        """
+        If you need gradient clipping/scaling or other processing, you can
+        wrap the optimizer with your custom `step()` method. But it is
+        suboptimal as explained in https://arxiv.org/abs/2006.15704 Sec 3.2.4
+        """
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+
 
     def train(self):
         """
