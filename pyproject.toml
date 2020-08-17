@@ -1,0 +1,35 @@
+[tool]
+[tool.poetry]
+name = "detectron2"
+version = "0.2.1"
+description = "Detectron2 is FAIR's next-generation research platform for object detection and segmentation."
+homepage = "https://github.com/facebookresearch/detectron2"
+authors = ["FAIR"]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+cloudpickle = "*"
+future = "*"
+fvcore = ">=0.1.1"
+matplotlib = "*"
+mock = "*"
+pillow = ">=7.1"
+psutil = {optional = true, version = "*"}
+pycocotools = ">=2.0.1"
+pydot = "*"
+shapely = {optional = true, version = "*"}
+tabulate = "*"
+tensorboard = "*"
+termcolor = ">=1.1"
+tqdm = ">4.29.0"
+yacs = ">=0.1.6"
+
+[tool.poetry.dev-dependencies]
+black = {git = "https://github.com/psf/black", rev = "673327449f86fce558adde153bb6cbe54bfebad2"}
+flake8 = "==3.8.1"
+flake8-bugbear = "*"
+flake8-comprehensions = "*"
+isort = "==4.3.21"
+
+[tool.poetry.extras]
+all = ["psutil", "shapely"]
