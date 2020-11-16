@@ -3,6 +3,7 @@ import math
 import numpy as np
 from typing import List
 import torch
+import torch.autograd.profiler as profiler
 from fvcore.nn import sigmoid_focal_loss_jit, smooth_l1_loss
 from torch import nn
 from torch.nn import functional as F
@@ -11,6 +12,10 @@ from detectron2.data.detection_utils import convert_image_to_rgb
 from detectron2.layers import ShapeSpec, batched_nms, cat
 from detectron2.structures import Boxes, ImageList, Instances, pairwise_iou
 from detectron2.utils.events import get_event_storage
+
+import region_profiler as rp
+from devtools import debug
+from pytorch_memlab import profile, profile_every
 
 from ..anchor_generator import build_anchor_generator
 from ..backbone import build_backbone
@@ -32,7 +37,6 @@ def permute_to_N_HWA_K(tensor, K):
     tensor = tensor.permute(0, 3, 4, 1, 2)
     tensor = tensor.reshape(N, -1, K)  # Size=(N,HWA,K)
     return tensor
-
 
 @META_ARCH_REGISTRY.register()
 class RetinaNet(nn.Module):
@@ -127,6 +131,7 @@ class RetinaNet(nn.Module):
         vis_name = f"Top: GT bounding boxes; Bottom: {max_boxes} Highest Scoring Results"
         storage.put_image(vis_name, vis_img)
 
+    @rp.func()
     def forward(self, batched_inputs):
         """
         Args:
@@ -145,42 +150,61 @@ class RetinaNet(nn.Module):
             dict[str: Tensor]:
                 mapping from a named loss to a tensor storing the loss. Used during training only.
         """
-        images = self.preprocess_image(batched_inputs)
-        features = self.backbone(images.tensor)
-        features = [features[f] for f in self.in_features]
 
-        anchors = self.anchor_generator(features)
-        pred_logits, pred_anchor_deltas = self.head(features)
+        with rp.region("preprocess_image"):
+            images = self.preprocess_image(batched_inputs)
+
+        with rp.region("backbone"):
+            features = self.backbone(images.tensor)
+
+        with rp.region("features"):
+            features = [features[f] for f in self.in_features]
+
+        with rp.region("anchor_generator"):
+            anchors = self.anchor_generator(features)
+
+        with rp.region("head"):
+            pred_logits, pred_anchor_deltas = self.head(features)
+
         # Transpose the Hi*Wi*A dimension to the middle:
-        pred_logits = [permute_to_N_HWA_K(x, self.num_classes) for x in pred_logits]
-        pred_anchor_deltas = [permute_to_N_HWA_K(x, 4) for x in pred_anchor_deltas]
+        with rp.region("transpose"):
+            pred_logits = [permute_to_N_HWA_K(x, self.num_classes) for x in pred_logits]
+            pred_anchor_deltas = [permute_to_N_HWA_K(x, 4) for x in pred_anchor_deltas]
+
 
         if self.training:
             assert "instances" in batched_inputs[0], "Instance annotations are missing in training!"
-            gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
+            with rp.region("gt_to_device"):
+                gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
+            with rp.region("label_anchors"):
+                gt_labels, gt_boxes = self.label_anchors(anchors, gt_instances)
 
-            gt_labels, gt_boxes = self.label_anchors(anchors, gt_instances)
-            losses = self.losses(anchors, pred_logits, gt_labels, pred_anchor_deltas, gt_boxes)
+            with rp.region("losses"):
+                losses = self.losses(anchors, pred_logits, gt_labels, pred_anchor_deltas, gt_boxes)
 
-            if self.vis_period > 0:
-                storage = get_event_storage()
-                if storage.iter % self.vis_period == 0:
-                    results = self.inference(
-                        anchors, pred_logits, pred_anchor_deltas, images.image_sizes
-                    )
-                    self.visualize_training(batched_inputs, results)
+            with rp.region("vis"):
+                if self.vis_period > 0:
+                    storage = get_event_storage()
+                    if storage.iter % self.vis_period == 0:
+                        results = self.inference(
+                            anchors, pred_logits, pred_anchor_deltas, images.image_sizes
+                        )
+                        self.visualize_training(batched_inputs, results)
 
             return losses
         else:
-            results = self.inference(anchors, pred_logits, pred_anchor_deltas, images.image_sizes)
-            processed_results = []
-            for results_per_image, input_per_image, image_size in zip(
-                results, batched_inputs, images.image_sizes
-            ):
-                height = input_per_image.get("height", image_size[0])
-                width = input_per_image.get("width", image_size[1])
-                r = detector_postprocess(results_per_image, height, width)
-                processed_results.append({"instances": r})
+            with rp.region("inference"):
+                results = self.inference(anchors, pred_logits, pred_anchor_deltas, images.image_sizes)
+
+            with rp.region("post_processing"):
+                processed_results = []
+                for results_per_image, input_per_image, image_size in zip(
+                    results, batched_inputs, images.image_sizes
+                ):
+                    height = input_per_image.get("height", image_size[0])
+                    width = input_per_image.get("width", image_size[1])
+                    r = detector_postprocess(results_per_image, height, width)
+                    processed_results.append({"instances": r})
             return processed_results
 
     def losses(self, anchors, pred_logits, gt_labels, pred_anchor_deltas, gt_boxes):
@@ -324,6 +348,8 @@ class RetinaNet(nn.Module):
             results.append(results_per_image)
         return results
 
+
+    @rp.func()
     def inference_single_image(self, anchors, box_cls, box_delta, image_size):
         """
         Single-image inference. Return bounding-box detection results by thresholding
@@ -347,26 +373,29 @@ class RetinaNet(nn.Module):
         # Iterate over every feature level
         for box_cls_i, box_reg_i, anchors_i in zip(box_cls, box_delta, anchors):
             # (HxWxAxK,)
-            box_cls_i = box_cls_i.flatten().sigmoid_()
+            with rp.region("sigmoid"):
+                box_cls_i = box_cls_i.flatten().sigmoid_()
 
             # (venky) sort was very expensive, we're going to throw these away anyway after sort
-            # Keep top k top scoring indices only.
-            num_topk = min(self.topk_candidates, box_reg_i.size(0))
+            with rp.region("filter score_threshold"):
+                # Keep top k top scoring indices only.
+                num_topk = min(self.topk_candidates, box_reg_i.size(0))
 
-            keep_idxs = box_cls_i > self.score_threshold
-            predicted_prob = box_cls_i[keep_idxs]
-            # (venky) unpack tuple to get the original indexes (that we are
-            # keeping). We need this so that we can convert to these
-            # after topk, so we can later apply this to box_reg_i etc.
-            keep_idxs, = keep_idxs.nonzero(as_tuple=True)
+                keep_idxs = box_cls_i > self.score_threshold
+                predicted_prob = box_cls_i[keep_idxs]
+                # (venky) unpack tuple to get the original indexes (that we are
+                # keeping). We need this so that we can convert to these
+                # after topk, so we can later apply this to box_reg_i etc.
+                keep_idxs, = keep_idxs.nonzero(as_tuple=True)
 
-            # torch.sort is actually faster than .topk (at least on GPUs)
-            predicted_prob, topk_idxs = predicted_prob.sort(descending=True)
-            predicted_prob = predicted_prob[:num_topk]
-            topk_idxs = topk_idxs[:num_topk]
+            with rp.region("sort_and_topk"):
+                # torch.sort is actually faster than .topk (at least on GPUs)
+                predicted_prob, topk_idxs = predicted_prob.sort(descending=True)
+                predicted_prob = predicted_prob[:num_topk]
+                topk_idxs = topk_idxs[:num_topk]
 
-            # (venky) convert back to original indexes
-            topk_idxs = keep_idxs[topk_idxs]
+                # (venky) convert back to original indexes
+                topk_idxs = keep_idxs[topk_idxs]
 
             # (venky - we did this before sort) filter out the proposals with low confidence score
             # keep_idxs = predicted_prob > self.score_threshold
@@ -379,31 +408,44 @@ class RetinaNet(nn.Module):
             box_reg_i = box_reg_i[anchor_idxs]
             anchors_i = anchors_i[anchor_idxs]
             # predict boxes
-            predicted_boxes = self.box2box_transform.apply_deltas(box_reg_i, anchors_i.tensor)
+
+            with rp.region("apply_deltas"):
+                predicted_boxes = self.box2box_transform.apply_deltas(box_reg_i, anchors_i.tensor)
 
             boxes_all.append(predicted_boxes)
             scores_all.append(predicted_prob)
             class_idxs_all.append(classes_idxs)
 
-        boxes_all, scores_all, class_idxs_all = [
-            cat(x) for x in [boxes_all, scores_all, class_idxs_all]
-        ]
-        keep = batched_nms(boxes_all, scores_all, class_idxs_all, self.nms_threshold)
-        keep = keep[: self.max_detections_per_image]
+        with rp.region("cat"):
+            boxes_all, scores_all, class_idxs_all = [
+                cat(x) for x in [boxes_all, scores_all, class_idxs_all]
+            ]
 
-        result = Instances(image_size)
-        result.pred_boxes = Boxes(boxes_all[keep])
-        result.scores = scores_all[keep]
-        result.pred_classes = class_idxs_all[keep]
+        with rp.region("batched_nms"):
+            keep = batched_nms(boxes_all, scores_all, class_idxs_all, self.nms_threshold)
+
+        with rp.region("truncate"):
+            keep = keep[: self.max_detections_per_image]
+
+        with rp.region("make Instances"):
+            result = Instances(image_size)
+            result.pred_boxes = Boxes(boxes_all[keep])
+            result.scores = scores_all[keep]
+            result.pred_classes = class_idxs_all[keep]
         return result
 
     def preprocess_image(self, batched_inputs):
         """
         Normalize, pad and batch the input images.
         """
-        images = [x["image"].to(self.device) for x in batched_inputs]
-        images = [(x - self.pixel_mean) / self.pixel_std for x in images]
-        images = ImageList.from_tensors(images, self.backbone.size_divisibility)
+        with rp.region("preprocess_image.batched_inputs"):
+            images = [x["image"] for x in batched_inputs]
+        with rp.region("preprocess_image.to_device"):
+            images = [x.to(self.device) for x in images]
+        with rp.region("preprocess_image.normalize"):
+            images = [(x - self.pixel_mean) / self.pixel_std for x in images]
+        with rp.region("preprocess_image.imagelist"):
+            images = ImageList.from_tensors(images, self.backbone.size_divisibility)
         return images
 
 
@@ -457,6 +499,7 @@ class RetinaNetHead(nn.Module):
         bias_value = -(math.log((1 - prior_prob) / prior_prob))
         torch.nn.init.constant_(self.cls_score.bias, bias_value)
 
+    @rp.func("head.forward")
     def forward(self, features):
         """
         Arguments:
@@ -476,6 +519,8 @@ class RetinaNetHead(nn.Module):
         logits = []
         bbox_reg = []
         for feature in features:
-            logits.append(self.cls_score(self.cls_subnet(feature)))
-            bbox_reg.append(self.bbox_pred(self.bbox_subnet(feature)))
+            with rp.region("cls_score"):
+                logits.append(self.cls_score(self.cls_subnet(feature)))
+            with rp.region("bbox_pred"):
+                bbox_reg.append(self.bbox_pred(self.bbox_subnet(feature)))
         return logits, bbox_reg
