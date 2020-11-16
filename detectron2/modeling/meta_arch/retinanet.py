@@ -74,6 +74,8 @@ class RetinaNet(nn.Module):
             allow_low_quality_matches=True,
         )
 
+        self.anchor_slice_size = cfg.MODEL.RETINANET.ANCHORS_SLICE_SIZE
+
         self.register_buffer("pixel_mean", torch.Tensor(cfg.MODEL.PIXEL_MEAN).view(-1, 1, 1))
         self.register_buffer("pixel_std", torch.Tensor(cfg.MODEL.PIXEL_STD).view(-1, 1, 1))
 
@@ -235,7 +237,26 @@ class RetinaNet(nn.Module):
             "loss_box_reg": loss_box_reg / self.loss_normalizer,
         }
 
+    def _label_anchors_one(self, anchors: Boxes, gt_boxes: Boxes):
+        tot_anchors = anchors.tensor.shape[0]
+        anchors_slice_size = self.anchor_slice_size or tot_anchors
+        anchors_cuts = range(0, tot_anchors, anchors_slice_size)
+
+        matched_idxs = []
+        anchor_labels = []
+        for s in anchors_cuts:
+            anchors_slice = torch.narrow(anchors.tensor, 0, s, anchors_slice_size)
+            match_quality_matrix = pairwise_iou(gt_boxes, Boxes(anchors_slice))
+            matched_idxs_slice, anchor_labels_slice = self.anchor_matcher(match_quality_matrix)
+            del match_quality_matrix
+
+            matched_idxs.append(matched_idxs_slice)
+            anchor_labels.append(anchor_labels_slice)
+
+        return torch.cat(matched_idxs), torch.cat(anchor_labels)
+
     @torch.no_grad()
+    # @profile_every(1)
     def label_anchors(self, anchors, gt_instances):
         """
         Args:
@@ -255,14 +276,14 @@ class RetinaNet(nn.Module):
                 feature maps. The values are the matched gt boxes for each anchor.
                 Values are undefined for those anchors not labeled as foreground.
         """
+
+
         anchors = Boxes.cat(anchors)  # Rx4
 
         gt_labels = []
         matched_gt_boxes = []
         for gt_per_image in gt_instances:
-            match_quality_matrix = pairwise_iou(gt_per_image.gt_boxes, anchors)
-            matched_idxs, anchor_labels = self.anchor_matcher(match_quality_matrix)
-            del match_quality_matrix
+            matched_idxs, anchor_labels = self._label_anchors_one(anchors, gt_per_image.gt_boxes)
 
             if len(gt_per_image) > 0:
                 matched_gt_boxes_i = gt_per_image.gt_boxes.tensor[matched_idxs]
