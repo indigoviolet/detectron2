@@ -349,17 +349,29 @@ class RetinaNet(nn.Module):
             # (HxWxAxK,)
             box_cls_i = box_cls_i.flatten().sigmoid_()
 
+            # (venky) sort was very expensive, we're going to throw these away anyway after sort
             # Keep top k top scoring indices only.
             num_topk = min(self.topk_candidates, box_reg_i.size(0))
+
+            keep_idxs = box_cls_i > self.score_threshold
+            predicted_prob = box_cls_i[keep_idxs]
+            # (venky) unpack tuple to get the original indexes (that we are
+            # keeping). We need this so that we can convert to these
+            # after topk, so we can later apply this to box_reg_i etc.
+            keep_idxs, = keep_idxs.nonzero(as_tuple=True)
+
             # torch.sort is actually faster than .topk (at least on GPUs)
-            predicted_prob, topk_idxs = box_cls_i.sort(descending=True)
+            predicted_prob, topk_idxs = predicted_prob.sort(descending=True)
             predicted_prob = predicted_prob[:num_topk]
             topk_idxs = topk_idxs[:num_topk]
 
-            # filter out the proposals with low confidence score
-            keep_idxs = predicted_prob > self.score_threshold
-            predicted_prob = predicted_prob[keep_idxs]
-            topk_idxs = topk_idxs[keep_idxs]
+            # (venky) convert back to original indexes
+            topk_idxs = keep_idxs[topk_idxs]
+
+            # (venky - we did this before sort) filter out the proposals with low confidence score
+            # keep_idxs = predicted_prob > self.score_threshold
+            # predicted_prob = predicted_prob[keep_idxs]
+            # topk_idxs = topk_idxs[keep_idxs]
 
             anchor_idxs = topk_idxs // self.num_classes
             classes_idxs = topk_idxs % self.num_classes
