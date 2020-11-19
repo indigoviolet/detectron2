@@ -261,23 +261,23 @@ class RetinaNet(nn.Module):
             "loss_box_reg": loss_box_reg / self.loss_normalizer,
         }
 
-    def _label_anchors_one(self, anchors: Boxes, gt_boxes: Boxes):
-        tot_anchors = anchors.tensor.shape[0]
-        anchors_slice_size = self.anchor_slice_size or tot_anchors
-        anchors_cuts = range(0, tot_anchors, anchors_slice_size)
+    # def _label_anchors_one_image(self, anchors: Boxes, gt_boxes: Boxes):
+    #     tot_anchors = anchors.tensor.shape[0]
+    #     anchors_slice_size = self.anchor_slice_size or tot_anchors
+    #     anchors_cuts = range(0, tot_anchors, anchors_slice_size)
 
-        matched_idxs = []
-        anchor_labels = []
-        for s in anchors_cuts:
-            anchors_slice = torch.narrow(anchors.tensor, 0, s, anchors_slice_size)
-            match_quality_matrix = pairwise_iou(gt_boxes, Boxes(anchors_slice))
-            matched_idxs_slice, anchor_labels_slice = self.anchor_matcher(match_quality_matrix)
-            del match_quality_matrix
+    #     matched_idxs = []
+    #     anchor_labels = []
+    #     for s in anchors_cuts:
+    #         anchors_slice = torch.narrow(anchors.tensor, 0, s, anchors_slice_size)
+    #         match_quality_matrix = pairwise_iou(gt_boxes, Boxes(anchors_slice))
+    #         matched_idxs_slice, anchor_labels_slice = self.anchor_matcher(match_quality_matrix)
+    #         del match_quality_matrix
 
-            matched_idxs.append(matched_idxs_slice)
-            anchor_labels.append(anchor_labels_slice)
+    #         matched_idxs.append(matched_idxs_slice)
+    #         anchor_labels.append(anchor_labels_slice)
 
-        return torch.cat(matched_idxs), torch.cat(anchor_labels)
+    #     return torch.cat(matched_idxs), torch.cat(anchor_labels)
 
     @torch.no_grad()
     # @profile_every(1)
@@ -307,7 +307,10 @@ class RetinaNet(nn.Module):
         gt_labels = []
         matched_gt_boxes = []
         for gt_per_image in gt_instances:
-            matched_idxs, anchor_labels = self._label_anchors_one(anchors, gt_per_image.gt_boxes)
+            match_quality_matrix = pairwise_iou(gt_per_image, anchors)
+            matched_idxs, anchor_labels = self.anchor_matcher(match_quality_matrix)
+
+            # matched_idxs, anchor_labels = self._label_anchors_one_image(anchors, gt_per_image.gt_boxes)
 
             if len(gt_per_image) > 0:
                 matched_gt_boxes_i = gt_per_image.gt_boxes.tensor[matched_idxs]
