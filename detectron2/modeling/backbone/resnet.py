@@ -382,14 +382,14 @@ class ResNet(Backbone):
 
         current_stride = self.stem.stride
         self._out_feature_strides = {
+            "input": 1,
+            "stem_before_maxpool": 2,
             "stem": current_stride,
-            "x": 1,
-            "before_maxpool": 2,
         }
         self._out_feature_channels = {
+            "input": 3,
+            "stem_before_maxpool": self.stem.out_channels,
             "stem": self.stem.out_channels,
-            "x": 3,
-            "before_maxpool": self.stem.out_channels,
         }
 
         self.stages_and_names = []
@@ -424,8 +424,10 @@ class ResNet(Backbone):
         self._out_features = out_features
         assert len(self._out_features)
         children = [x[0] for x in self.named_children()]
-        for out_feature in self._out_features:
-            assert out_feature in children, "Available children: {}".format(", ".join(children))
+
+        # (venky) we want to allow stem_before_maxpool, input even though they aren't children
+        # for out_feature in self._out_features:
+        #     assert out_feature in children, "Available children: {}".format(", ".join(children))
 
     def forward(self, x):
         """
@@ -438,9 +440,12 @@ class ResNet(Backbone):
         assert (
             x.dim() == 4
         ), f"ResNet takes an input of shape (N, C, H, W). Got {x.shape} instead!"
-        outputs = {"x": x}
-        before_maxpool, x = self.stem(x)
-        outputs["before_maxpool"] = before_maxpool
+        outputs = {}
+        if "input" in self._out_features:
+            outputs["input"] = x
+        stem_before_maxpool, x = self.stem(x)
+        if "stem_before_maxpool" in self._out_features:
+            outputs["stem_before_maxpool"] = stem_before_maxpool
         if "stem" in self._out_features:
             outputs["stem"] = x
         for stage, name in self.stages_and_names:
@@ -460,7 +465,7 @@ class ResNet(Backbone):
             name: ShapeSpec(
                 channels=self._out_feature_channels[name], stride=self._out_feature_strides[name]
             )
-            for name in self._out_features + ['x', 'before_maxpool']
+            for name in self._out_features
         }
 
     def freeze(self, freeze_at=0):
@@ -620,7 +625,9 @@ def build_resnet_backbone(cfg, input_shape):
 
     # Avoid creating variables without gradients
     # It consumes extra memory and may cause allreduce to fail
-    out_stage_idx = [{"res2": 2, "res3": 3, "res4": 4, "res5": 5}[f] for f in out_features]
+    # (venky) need to allow 'stem_before_maxpool', 'input' etc in out_features
+    out_stage_idxs = {"res2": 2, "res3": 3, "res4": 4, "res5": 5}
+    out_stage_idx = [out_stage_idxs[f] for f in out_features if f in out_stage_idxs]
     max_stage_idx = max(out_stage_idx)
     for idx, stage_idx in enumerate(range(2, max_stage_idx + 1)):
         dilation = res5_dilation if stage_idx == 5 else 1
