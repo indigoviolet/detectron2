@@ -1,4 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+import math
+
 from .config import CfgNode as CN
 
 # -----------------------------------------------------------------------------
@@ -221,6 +223,7 @@ _C.MODEL.RPN.BBOX_REG_LOSS_TYPE = "smooth_l1"
 _C.MODEL.RPN.BBOX_REG_LOSS_WEIGHT = 1.0
 # Weights on (dx, dy, dw, dh) for normalizing RPN anchor regression targets
 _C.MODEL.RPN.BBOX_REG_WEIGHTS = (1.0, 1.0, 1.0, 1.0)
+_C.MODEL.RPN.BBOX_REG_SCALE_CLAMP = math.log(1000./16.)
 # The transition point from L1 to L2 loss. Set to 0.0 to make the loss simply L1.
 _C.MODEL.RPN.SMOOTH_L1_BETA = 0.0
 _C.MODEL.RPN.LOSS_WEIGHT = 1.0

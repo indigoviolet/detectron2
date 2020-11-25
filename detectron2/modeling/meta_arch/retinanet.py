@@ -71,7 +71,10 @@ class RetinaNet(nn.Module):
         self.anchor_generator = build_anchor_generator(cfg, feature_shapes)
 
         # Matching and loss
-        self.box2box_transform = Box2BoxTransform(weights=cfg.MODEL.RPN.BBOX_REG_WEIGHTS)
+        self.box2box_transform = Box2BoxTransform(
+            weights=cfg.MODEL.RPN.BBOX_REG_WEIGHTS,
+            scale_clamp=cfg.MODEL.RPN.BBOX_REG_SCALE_CLAMP
+        )
         self.anchor_matcher = Matcher(
             cfg.MODEL.RETINANET.IOU_THRESHOLDS,
             cfg.MODEL.RETINANET.IOU_LABELS,
@@ -193,6 +196,7 @@ class RetinaNet(nn.Module):
 
             return losses
         else:
+            # return pred_anchor_deltas
             with rp.region("inference"):
                 results = self.inference(anchors, pred_logits, pred_anchor_deltas, images.image_sizes)
 
@@ -307,7 +311,7 @@ class RetinaNet(nn.Module):
         gt_labels = []
         matched_gt_boxes = []
         for gt_per_image in gt_instances:
-            match_quality_matrix = pairwise_iou(gt_per_image, anchors)
+            match_quality_matrix = pairwise_iou(gt_per_image.gt_boxes, anchors)
             matched_idxs, anchor_labels = self.anchor_matcher(match_quality_matrix)
 
             # matched_idxs, anchor_labels = self._label_anchors_one_image(anchors, gt_per_image.gt_boxes)
